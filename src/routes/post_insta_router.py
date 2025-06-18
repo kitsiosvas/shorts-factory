@@ -1,19 +1,18 @@
 import gc
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
-import yt_dlp
 import os
 import random
-from instagrapi import Client
-import uvicorn
 import logging
+from instagrapi import Client
 from datetime import datetime
-from dotenv import load_dotenv
 import time
 
-load_dotenv()
-IG_USERNAME = os.getenv("IG_USERNAME")
-IG_PASSWORD = os.getenv("IG_PASSWORD")
+
+logger = logging.getLogger(__name__)
+
+router_upload = APIRouter()
+
 
 
 def force_delete_file(file_path, retries=5, delay=1):
@@ -30,48 +29,13 @@ def force_delete_file(file_path, retries=5, delay=1):
     logger.error(f"Could not delete file: {file_path}")
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("app.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
-app = FastAPI()
 
-class VideoURL(BaseModel):
-    url: str
 
 class VideoPost(BaseModel):
     caption: str = ""
 
-@app.post("/download-video/")
-async def download_video(video: VideoURL):
-    try:
-        logger.info(f"Starting download for URL: {video.url}")
-        download_path = 'C:/Users/User/Desktop/insta_vid_downloader/vids/%(title)s.%(ext)s'
-        ydl_opts = {
-            'outtmpl': download_path,
-            'format': 'mp4',
-        }
-
-        os.makedirs('C:/Users/User/Desktop/insta_vid_downloader/vids', exist_ok=True)
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video.url, download=True)
-            downloaded_file = ydl.prepare_filename(info)
-
-        logger.info(f"Video downloaded successfully: {downloaded_file}")
-        return {"message": "Video downloaded successfully", "file_path": downloaded_file}
-    except Exception as e:
-        logger.error(f"Error downloading video: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error downloading video: {str(e)}")
-
-@app.post("/post-video/")
+@router_upload.post("/post-video/")
 async def post_random_video(video: VideoPost):
     try:
         vids_dir = 'C:/Users/User/Desktop/insta_vid_downloader/vids'
@@ -112,5 +76,4 @@ async def post_random_video(video: VideoPost):
         logger.error(f"Error posting video: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error posting video: {str(e)}")
 
-if __name__ == "__main__":
-    uvicorn.run(app, port=8000)
+
