@@ -1,0 +1,6 @@
+yt_dlp
+fastapi
+uvicorn
+instagrapi
+pillow
+moviepy
