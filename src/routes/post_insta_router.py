@@ -7,6 +7,7 @@ import logging
 from instagrapi import Client
 from datetime import datetime
 import time
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +33,15 @@ class VideoPost(BaseModel):
 @router_upload.post("/post-video/")
 async def post_random_video(video: VideoPost):
     try:
-        vids_dir = 'C:/Users/User/Desktop/insta_vid_downloader/vids'
-        logger.info(f"Fetching random video from directory: {vids_dir}")
+        logger.info(f"Fetching random video from directory: {settings.vids_dir}")
 
-        video_files = [f for f in os.listdir(vids_dir) if f.lower().endswith('.mp4')]
+        video_files = [f for f in os.listdir(settings.vids_dir) if f.lower().endswith('.mp4')]
         if not video_files:
             logger.warning("No video files found in directory")
             raise HTTPException(status_code=404, detail="No video files available to post")
 
         chosen_video = random.choice(video_files)
-        full_path = os.path.join(vids_dir, chosen_video)
+        full_path = os.path.join(settings.vids_dir, chosen_video)
         logger.info(f"Selected video for upload: {full_path}")
 
         if not os.path.exists(full_path):
@@ -50,7 +50,7 @@ async def post_random_video(video: VideoPost):
 
         logger.info("Attempting Instagram login")
         ig_client = Client()
-        ig_client.login(os.getenv("IG_USERNAME"), os.getenv("IG_PASSWORD"))
+        ig_client.login(settings.IG_USERNAME, settings.IG_USERNAME)
         logger.info("Instagram login successful")
 
         logger.info(f"Uploading Reel with caption: '{video.caption}'")

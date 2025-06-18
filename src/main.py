@@ -1,9 +1,7 @@
 import logging
-import os
-from dotenv import load_dotenv
 from fastapi import FastAPI
 import uvicorn
-
+from config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,14 +12,10 @@ logging.basicConfig(
     ]
 )
 
-load_dotenv()
-IG_USERNAME = os.getenv("IG_USERNAME")
-IG_PASSWORD = os.getenv("IG_PASSWORD")
 app = FastAPI()
 
 from routes.download_video_router import router_download
 from routes.post_insta_router import router_upload
-
 
 app.include_router(router_download)
 app.include_router(router_upload)
