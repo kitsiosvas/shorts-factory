@@ -32,11 +32,12 @@ class VideoPost(BaseModel):
 @router_upload.post("/post-video/")
 async def post_random_video(video: VideoPost):
     try:
-        logger.info(f"Fetching random video from directory: {settings.vids_dir}")
-        time.sleep(random.uniform(5, 15))  # Short random delay
         if not ig_client:
             logger.error("Instagram client not initialized")
             raise HTTPException(status_code=500, detail="Instagram client not initialized")
+        
+        logger.info(f"Fetching random video from directory: {settings.vids_dir}")
+        time.sleep(random.uniform(5, 15))
 
         video_files = [f for f in os.listdir(settings.vids_dir) if f.lower().endswith('.mp4')]
         if not video_files:

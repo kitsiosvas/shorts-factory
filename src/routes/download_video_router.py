@@ -27,12 +27,13 @@ def is_downloaded(url):
 
 def log_download(url):
     url_hash = hashlib.sha256(url.encode()).hexdigest()
-    with open("downloaded_urls.json", "r") as f:
+    with open("downloaded_urls.json", "r+") as f:
         data = json.load(f)
-    if url_hash not in data["urls"]:
-        data["urls"].append(url_hash)
-        with open("downloaded_urls.json", "w") as f:
+        if url_hash not in data["urls"]:
+            data["urls"].append(url_hash)
+            f.seek(0)
             json.dump(data, f, indent=2)
+            f.truncate()
 
 # Initialize JSON file
 init_json_file()
