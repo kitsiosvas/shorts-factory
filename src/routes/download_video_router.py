@@ -81,7 +81,7 @@ async def download_random_reel():
         account = random.choice(settings.similar_accounts)
         logger.info(f"Selected account: {account}")
 
-        medias = settings.ig_client.user_medias(settings.ig_client.user_id_from_username(account), amount=2)
+        medias = settings.ig_client.user_medias(settings.ig_client.user_id_from_username(account), amount=10)
         reels = [media for media in medias if media.media_type == 2 and media.video_url]
         if not reels:
             logger.warning(f"No Reels found for account: {account}")

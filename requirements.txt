@@ -4,3 +4,5 @@ uvicorn
 instagrapi
 pillow
 moviepy
+httpx
+apscheduler
