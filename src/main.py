@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI
 import uvicorn
-from config import settings, init_client
+from config import settings, init_client, ig_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +19,6 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global ig_client
     if ig_client:
         ig_client.logout()
         logger.info("Instagram client logged out")

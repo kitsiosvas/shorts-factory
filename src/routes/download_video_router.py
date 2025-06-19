@@ -71,11 +71,12 @@ async def download_video(video: VideoURL):
 @router_download.post("/download-random-reel/")
 async def download_random_reel():
     try:
-        logger.info("Fetching random Reel from similar accounts")
-        time.sleep(random.uniform(5, 15))
         if not ig_client:
             logger.error("Instagram client not initialized")
             raise HTTPException(status_code=500, detail="Instagram client not initialized")
+
+        logger.info("Fetching random Reel from similar accounts")
+        time.sleep(random.uniform(5, 15))
 
         account = random.choice(settings.similar_accounts)
         logger.info(f"Selected account: {account}")
