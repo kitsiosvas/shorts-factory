@@ -180,3 +180,5 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 /vids
+downloaded_urls.json
+settings.json
