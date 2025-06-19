@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI
 import uvicorn
-from config import settings, init_client, ig_client
+from config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,12 +15,12 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    init_client()
+    pass
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    if ig_client:
-        ig_client.logout()
+    if settings.ig_client:
+        settings.ig_client.logout()
         logger.info("Instagram client logged out")
 
 from routes.download_video_router import router_download

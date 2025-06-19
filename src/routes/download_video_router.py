@@ -7,7 +7,7 @@ import logging
 import random
 import hashlib
 import time
-from config import settings, ig_client
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ async def download_video(video: VideoURL):
 @router_download.post("/download-random-reel/")
 async def download_random_reel():
     try:
-        if not ig_client:
+        if not settings.ig_client:
             logger.error("Instagram client not initialized")
             raise HTTPException(status_code=500, detail="Instagram client not initialized")
 
@@ -81,7 +81,7 @@ async def download_random_reel():
         account = random.choice(settings.similar_accounts)
         logger.info(f"Selected account: {account}")
 
-        medias = ig_client.user_medias(ig_client.user_id_from_username(account), amount=2)
+        medias = settings.ig_client.user_medias(settings.ig_client.user_id_from_username(account), amount=2)
         reels = [media for media in medias if media.media_type == 2 and media.video_url]
         if not reels:
             logger.warning(f"No Reels found for account: {account}")

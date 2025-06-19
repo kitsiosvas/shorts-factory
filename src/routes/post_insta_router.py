@@ -6,7 +6,7 @@ import random
 import logging
 import time
 from datetime import datetime
-from config import settings, ig_client
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class VideoPost(BaseModel):
 @router_upload.post("/post-video/")
 async def post_random_video(video: VideoPost):
     try:
-        if not ig_client:
+        if not settings.ig_client:
             logger.error("Instagram client not initialized")
             raise HTTPException(status_code=500, detail="Instagram client not initialized")
         
@@ -54,7 +54,7 @@ async def post_random_video(video: VideoPost):
 
         logger.info(f"Uploading Reel with caption: '{video.caption}'")
         start_time = datetime.now()
-        ig_client.clip_upload(
+        settings.ig_client.clip_upload(
             path=full_path,
             caption=video.caption,
             extra_data={"is_reel": True}
