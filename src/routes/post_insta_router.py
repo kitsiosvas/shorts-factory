@@ -27,7 +27,7 @@ def force_delete_file(file_path, retries=5, delay=1):
     raise HTTPException(status_code=500, detail=f"Failed to delete file: {file_path}")
 
 class VideoPost(BaseModel):
-    caption: str = "First account ever to reach 1M likes without followers!!!"
+    caption: str = settings.default_caption
 
 @router_upload.post("/post-video/")
 async def post_random_video(video: VideoPost):

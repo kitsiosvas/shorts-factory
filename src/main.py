@@ -20,20 +20,32 @@ async def download_task():
     logger.info("Triggering random Reel download")
     try:
         logger.info("Running scheduled download task")
-        await asyncio.sleep(random.uniform(30, 300))  # Random delay
+        await asyncio.sleep(random.uniform(300, 1500))
         async with httpx.AsyncClient() as client:
             response = await client.post("http://localhost:8000/download-random-reel/")
             logger.info(f"Download response: {response.json()}")
     except Exception as e:
         logger.error(f"Download task failed: {str(e)}")
 
+async def upload_task():
+    logger.info("Triggering random video upload")
+    try:
+        logger.info("Running scheduled upload task")
+        await asyncio.sleep(random.uniform(300, 1500))
+        async with httpx.AsyncClient() as client:
+            response = await client.post("http://localhost:8000/post-video/", json={"caption": settings.default_caption})
+            logger.info(f"Upload response: {response.json()}")
+    except Exception as e:
+        logger.error(f"Upload task failed: {str(e)}")
+
 @app.on_event("startup")
 async def startup_event():
     settings.init_client()
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(download_task, "interval", minutes=60)
+    # scheduler.add_job(download_task, "interval", minutes=60)
+    scheduler.add_job(upload_task, "interval", minutes=100)
     scheduler.start()
-    logger.info("Download scheduler started")
+    logger.info("Download and upload scheduler started")
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     vids_dir: str = None
     similar_accounts: List[str] = None
     ig_client: Union[Client, None] = None
+    default_caption: str = "First account ever to reach 1M likes without followers!!!"
 
     def init_client(self):
         try:
