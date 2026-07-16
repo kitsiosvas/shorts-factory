@@ -42,8 +42,8 @@ async def upload_task():
 async def startup_event():
     settings.init_client()
     scheduler = AsyncIOScheduler()
-    # scheduler.add_job(download_task, "interval", minutes=60)
-    scheduler.add_job(upload_task, "interval", minutes=100)
+    scheduler.add_job(download_task, "interval", minutes=150)
+    scheduler.add_job(upload_task, "interval", minutes=240)
     scheduler.start()
     logger.info("Download and upload scheduler started")
 
