@@ -5,12 +5,13 @@ import shutil
 from pathlib import Path
 
 from src.config import Settings, TopicConfig, get_settings
-from src.db import Database, JobStatus
+from src.db import Database, JobStatus, RenderStatus
 from src.discover import discover_for_topic
 from src.ingest import download_video
 from src.intelligence import get_transcript, pick_highlights
 from src.intelligence.highlights import verify_clip_gemini
-from src.intelligence.words import snap_clip_to_sentences, transcribe_window_words
+from src.intelligence.models import HighlightClip
+from src.intelligence.words import Word, snap_clip_to_sentences, transcribe_window_words
 from src.publish.youtube import YouTubePublisher
 from src.render import (
     burn_hook_text,
@@ -25,6 +26,17 @@ from src.render.subtitles import segments_to_ass, words_to_ass
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
+
+
+def _windows_overlap(
+    start_a: float,
+    end_a: float,
+    start_b: float,
+    end_b: float,
+    *,
+    min_gap: float,
+) -> bool:
+    return not (end_a + min_gap <= start_b or end_b + min_gap <= start_a)
 
 
 class Pipeline:
@@ -159,6 +171,9 @@ class Pipeline:
                 gemini_model=pipeline.gemini_model,
                 ollama_base_url=self.settings.ollama_base_url,
                 ollama_model=pipeline.ollama_model,
+                max_clips_per_source=pipeline.max_clips_per_source,
+                picker_chunk_sec=float(pipeline.picker_chunk_sec),
+                clip_min_gap_sec=float(pipeline.clip_min_gap_sec),
             )
             if not clips:
                 raise RuntimeError(
@@ -168,9 +183,12 @@ class Pipeline:
 
             self.db.add_quota("llm", 1)
 
-            selected = None
+            accepted: list[tuple[HighlightClip, float, float, list[Word], float]] = []
+            soft_candidates: list[tuple[float, HighlightClip, float, float, list[Word]]] = []
             rejections: list[str] = []
-            for cand in clips[:3]:
+            min_gap = float(pipeline.clip_min_gap_sec)
+
+            for cand in clips:
                 if cand.score < pipeline.min_clip_score:
                     rejections.append(
                         f"{cand.start_sec:.0f}-{cand.end_sec:.0f}s: "
@@ -179,7 +197,7 @@ class Pipeline:
                     continue
 
                 start, end = cand.start_sec, cand.end_sec
-                clip_words: list = []
+                clip_words: list[Word] = []
                 if pipeline.snap_to_sentences:
                     try:
                         words = transcribe_window_words(
@@ -209,18 +227,29 @@ class Pipeline:
                             "Sentence snapping failed; using raw LLM bounds"
                         )
 
+                if any(
+                    _windows_overlap(start, end, a_start, a_end, min_gap=min_gap)
+                    for _, a_start, a_end, _, _ in accepted
+                ):
+                    rejections.append(
+                        f"{start:.0f}-{end:.0f}s: overlaps an already-accepted clip"
+                    )
+                    continue
+
                 clip_text = (
                     " ".join(w.text for w in clip_words)
                     if clip_words
                     else transcript.text_between(start, end)
                 )
 
+                verifier_score = float(cand.score)
                 if pipeline.enable_verifier and pipeline.llm_provider == "gemini":
                     v = verify_clip_gemini(
                         clip_text,
                         api_key=self.settings.gemini_api_key or "",
                         model=pipeline.gemini_model,
                     )
+                    verifier_score = float(v["score"])
                     logger.info(
                         "Verifier %.0f-%.0fs verdict=%s score=%.0f issues=%s",
                         start,
@@ -229,89 +258,166 @@ class Pipeline:
                         v["score"],
                         v["issues"],
                     )
-                    if v["verdict"] != "pass" or (
-                        0 <= v["score"] < pipeline.min_clip_score
-                    ):
+                    hard_pass = v["verdict"] == "pass" and (
+                        v["score"] < 0 or v["score"] >= pipeline.min_clip_score
+                    )
+                    if not hard_pass:
                         rejections.append(
                             f"{start:.0f}-{end:.0f}s: verifier {v['verdict']} "
                             f"score={v['score']:.0f} ({v['issues']})"
                         )
+                        if (
+                            pipeline.verifier_soft_floor > 0
+                            and v["score"] >= pipeline.verifier_soft_floor
+                        ):
+                            soft_candidates.append(
+                                (v["score"], cand, start, end, clip_words)
+                            )
                         continue
+                elif cand.score < pipeline.min_clip_score:
+                    continue
 
-                selected = (cand, start, end, clip_words)
-                break
+                accepted.append((cand, start, end, clip_words, verifier_score))
+                if len(accepted) >= pipeline.max_clips_per_source:
+                    break
 
-            if selected is None:
+            if not accepted and soft_candidates:
+                soft_candidates.sort(key=lambda x: x[0], reverse=True)
+                for score, cand, start, end, clip_words in soft_candidates:
+                    if any(
+                        _windows_overlap(start, end, a_start, a_end, min_gap=min_gap)
+                        for _, a_start, a_end, _, _ in accepted
+                    ):
+                        continue
+                    logger.warning(
+                        "Soft-pass score=%.0f bounds=%.1f-%.1fs",
+                        score,
+                        start,
+                        end,
+                    )
+                    accepted.append((cand, start, end, clip_words, score))
+                    if len(accepted) >= pipeline.max_clips_per_source:
+                        break
+
+            if not accepted:
                 logger.warning("All candidates rejected: %s", rejections)
                 raise RuntimeError(f"All candidate clips rejected: {rejections}")
 
-            best, start, end, clip_words = selected
-            hook_from_llm = best.hook_title
-            logger.info(
-                "Selected highlight %.1f-%.1fs score=%.0f cost~$%s provider=%s reason=%s",
-                start,
-                end,
-                best.score,
-                highlight_meta.get("estimated_cost_usd"),
-                highlight_meta.get("provider"),
-                best.reason[:120],
-            )
             if rejections:
-                logger.info("Earlier rejections: %s", rejections)
+                logger.info("Rejections / skips: %s", rejections)
 
-            clip_path = self.settings.media_raw_dir / f"{source.youtube_video_id}_clip.mp4"
-            start, end = extract_clip(
-                raw_path,
-                clip_path,
-                max_seconds=pipeline.clip_max_seconds,
-                start_sec=start,
-                end_sec=end,
-            )
+            rendered_out: list[dict] = []
+            first_ready: Path | None = None
+            first_title = ""
+            first_description = ""
+            first_start = 0.0
+            first_end = 0.0
 
-            ass_path = None
-            if pipeline.burn_captions:
-                ass_path = (
-                    self.settings.media_raw_dir / f"{source.youtube_video_id}_subs.ass"
+            for clip_index, (cand, start, end, clip_words, verifier_score) in enumerate(
+                accepted
+            ):
+                logger.info(
+                    "Rendering clip %d/%.0f-%.0fs score=%.0f title=%s",
+                    clip_index,
+                    start,
+                    end,
+                    cand.score,
+                    (cand.hook_title or "")[:80],
                 )
-                if clip_words:
-                    words_to_ass(clip_words, clip_start=start, output_path=ass_path)
-                else:
-                    segments_to_ass(
-                        transcript.segments,
-                        clip_start=start,
-                        clip_end=end,
-                        output_path=ass_path,
+                suffix = f"_{clip_index}" if len(accepted) > 1 else ""
+                clip_path = (
+                    self.settings.media_raw_dir
+                    / f"{source.youtube_video_id}{suffix}_clip.mp4"
+                )
+                start, end = extract_clip(
+                    raw_path,
+                    clip_path,
+                    max_seconds=pipeline.clip_max_seconds,
+                    start_sec=start,
+                    end_sec=end,
+                )
+
+                ass_path = None
+                if pipeline.burn_captions:
+                    ass_path = (
+                        self.settings.media_raw_dir
+                        / f"{source.youtube_video_id}{suffix}_subs.ass"
                     )
+                    if clip_words:
+                        words_to_ass(clip_words, clip_start=start, output_path=ass_path)
+                    else:
+                        segments_to_ass(
+                            transcript.segments,
+                            clip_start=start,
+                            clip_end=end,
+                            output_path=ass_path,
+                        )
 
-            vertical_path = self.settings.media_raw_dir / f"{source.youtube_video_id}_vert.mp4"
-            to_vertical_916(clip_path, vertical_path, ass_path=ass_path)
+                vertical_path = (
+                    self.settings.media_raw_dir
+                    / f"{source.youtube_video_id}{suffix}_vert.mp4"
+                )
+                to_vertical_916(clip_path, vertical_path, ass_path=ass_path)
 
-            title = generate_hook_title(hook_from_llm or source.title, None)
-            description = generate_description(source.title, source.url, topic_name)
+                title = generate_hook_title(cand.hook_title or source.title, None)
+                description = generate_description(source.title, source.url, topic_name)
+                ready_path = (
+                    self.settings.media_ready_dir
+                    / f"{source.youtube_video_id}{suffix}.mp4"
+                )
+                burn_hook_text(vertical_path, ready_path, title)
 
-            ready_path = self.settings.media_ready_dir / f"{source.youtube_video_id}.mp4"
-            burn_hook_text(vertical_path, ready_path, title)
+                render_id = self.db.insert_render(
+                    source_id=source.id,
+                    clip_index=clip_index,
+                    start_sec=start,
+                    end_sec=end,
+                    ready_path=str(ready_path),
+                    generated_title=title,
+                    generated_description=description,
+                    verifier_score=verifier_score,
+                    status=RenderStatus.RENDERED.value,
+                )
+                rendered_out.append(
+                    {
+                        "render_id": render_id,
+                        "clip_index": clip_index,
+                        "ready_path": str(ready_path),
+                        "title": title,
+                        "start": start,
+                        "end": end,
+                        "verifier_score": verifier_score,
+                    }
+                )
+                if first_ready is None:
+                    first_ready = ready_path
+                    first_title = title
+                    first_description = description
+                    first_start = start
+                    first_end = end
+
+                for temp in (clip_path, vertical_path, ass_path):
+                    if temp is not None and temp.exists():
+                        temp.unlink(missing_ok=True)
 
             self.db.update_source(
                 source.id,
                 status=JobStatus.RENDERED.value,
-                ready_path=str(ready_path),
-                clip_start_sec=start,
-                clip_end_sec=end,
-                generated_title=title,
-                generated_description=description,
+                ready_path=str(first_ready) if first_ready else None,
+                clip_start_sec=first_start,
+                clip_end_sec=first_end,
+                generated_title=first_title,
+                generated_description=first_description,
                 error=None,
             )
-            for temp in (clip_path, vertical_path, ass_path):
-                if temp is not None and temp.exists():
-                    temp.unlink(missing_ok=True)
 
             return {
                 "status": "rendered",
                 "source_id": source.id,
-                "ready_path": str(ready_path),
-                "title": title,
-                "clip": {"start": start, "end": end},
+                "renders": rendered_out,
+                "ready_path": str(first_ready) if first_ready else None,
+                "title": first_title,
+                "clip": {"start": first_start, "end": first_end},
                 "highlight": highlight_meta,
                 "rejections": rejections,
             }
@@ -339,6 +445,11 @@ class Pipeline:
                 ),
             }
 
+        render = self.db.next_render_by_status(RenderStatus.RENDERED)
+        if render is not None:
+            return self._publish_render(render, pipeline)
+
+        # Legacy fallback: source-level ready_path with no renders rows
         source = self.db.next_by_status(JobStatus.RENDERED)
         if source is None:
             return {"status": "idle", "message": "No rendered Shorts ready to publish"}
@@ -391,14 +502,120 @@ class Pipeline:
             "url": f"https://youtube.com/shorts/{result.platform_post_id}",
         }
 
+    def _publish_render(self, render, pipeline) -> dict:
+        source = self.db.get_source(render.source_id)
+        if source is None:
+            self.db.update_render(
+                render.id,
+                status=RenderStatus.FAILED.value,
+                error="parent source missing",
+            )
+            return {"status": "failed", "render_id": render.id, "error": "parent source missing"}
+
+        if not self._topic_enabled(source.topic_id):
+            self.db.update_source(source.id, status=JobStatus.SKIPPED.value, error="topic disabled")
+            self.db.update_render(
+                render.id,
+                status=RenderStatus.FAILED.value,
+                error="topic disabled",
+            )
+            return {"status": "skipped", "source_id": source.id, "reason": "topic disabled"}
+
+        if not render.ready_path or not Path(render.ready_path).exists():
+            self.db.update_render(
+                render.id,
+                status=RenderStatus.FAILED.value,
+                error="ready_path missing",
+            )
+            return {
+                "status": "failed",
+                "source_id": source.id,
+                "render_id": render.id,
+                "error": "ready_path missing",
+            }
+
+        result = self.youtube.publish_video(
+            video_path=Path(render.ready_path),
+            title=render.generated_title or source.generated_title or f"{source.title} #Shorts",
+            description=(
+                render.generated_description
+                or source.generated_description
+                or f"{source.title}\n#Shorts"
+            ),
+        )
+        if not result.success:
+            self.db.update_render(
+                render.id,
+                status=RenderStatus.FAILED.value,
+                error=(result.error or "upload failed")[:2000],
+            )
+            self.db.insert_post(
+                source_id=source.id,
+                platform="youtube",
+                platform_post_id=None,
+                status="failed",
+                error=result.error,
+                render_id=render.id,
+            )
+            return {
+                "status": "failed",
+                "source_id": source.id,
+                "render_id": render.id,
+                "error": result.error,
+            }
+
+        self.db.add_quota("youtube", pipeline.upload_quota_cost)
+        self.db.insert_post(
+            source_id=source.id,
+            platform="youtube",
+            platform_post_id=result.platform_post_id,
+            status="published",
+            render_id=render.id,
+        )
+
+        ready = Path(render.ready_path)
+        archive = self.settings.media_archive_dir / ready.name
+        archived = str(ready)
+        try:
+            shutil.move(str(ready), str(archive))
+            archived = str(archive)
+        except OSError:
+            logger.warning("Could not archive %s", ready)
+
+        self.db.update_render(
+            render.id,
+            status=RenderStatus.PUBLISHED.value,
+            ready_path=archived,
+            error=None,
+        )
+
+        if not self.db.source_has_unpublished_renders(source.id):
+            self.db.update_source(
+                source.id,
+                status=JobStatus.PUBLISHED.value,
+                ready_path=archived,
+                error=None,
+            )
+
+        return {
+            "status": "published",
+            "source_id": source.id,
+            "render_id": render.id,
+            "clip_index": render.clip_index,
+            "youtube_id": result.platform_post_id,
+            "url": f"https://youtube.com/shorts/{result.platform_post_id}",
+        }
+
     def status(self) -> dict:
         pipeline = self.settings.pipeline()
         return {
             "sources": self.db.status_counts(),
+            "renders": self.db.render_status_counts(),
             "youtube_posts_today": self.db.count_posts_today("youtube"),
             "youtube_quota_today": self.db.get_quota_today("youtube"),
             "llm_highlights_today": self.db.get_quota_today("llm"),
             "max_llm_highlights_per_day": pipeline.max_llm_highlights_per_day,
+            "max_clips_per_source": pipeline.max_clips_per_source,
             "llm_provider": pipeline.llm_provider,
             "quota_budget": pipeline.youtube_daily_quota_budget,
             "max_publishes_per_day": pipeline.max_publishes_per_day,
@@ -406,7 +623,7 @@ class Pipeline:
             "gemini_cost_hint": {
                 "model": pipeline.gemini_model,
                 "per_video_usd_paid_tier_approx": "0.002 - 0.01",
-                "note": "Free tier often $0; default model gemini-2.0-flash with automatic fallbacks",
+                "note": "Long sources use chunked Gemini calls; quota still 1 unit/source",
             },
         }
 

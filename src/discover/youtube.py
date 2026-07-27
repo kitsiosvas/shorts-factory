@@ -48,7 +48,8 @@ def discover_for_topic(topic: TopicConfig, *, api_key: str | None = None) -> lis
             "type": "video",
             "order": "viewCount",
             "maxResults": topic.max_results_per_query,
-            "videoDuration": "medium",
+            # YouTube API: medium = 4–20m, long = >20m
+            "videoDuration": "medium" if topic.max_duration_sec <= 1200 else "long",
             "relevanceLanguage": "en",
         }
         if topic.require_captions:

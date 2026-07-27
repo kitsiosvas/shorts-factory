@@ -19,6 +19,58 @@ topics:
     require_captions: true
     creative_commons_only: false
 
+  - id: sleep_science
+    enabled: true
+    display_name: Sleep Science
+    search_queries:
+      - "sleep science explained"
+      - "circadian rhythm explained"
+      - "how sleep works podcast"
+    exclude_keywords:
+      - "asmr"
+      - "sleep music"
+      - "white noise"
+    min_duration_sec: 1200
+    max_duration_sec: 7200
+    min_view_count: 50000
+    max_results_per_query: 6
+    require_captions: true
+    creative_commons_only: false
+
+  - id: brain_performance
+    enabled: true
+    display_name: Brain Performance
+    search_queries:
+      - "dopamine explained"
+      - "focus and attention science"
+      - "neuroscience learning podcast"
+    exclude_keywords:
+      - "asmr"
+      - "meditation music"
+    min_duration_sec: 1200
+    max_duration_sec: 7200
+    min_view_count: 50000
+    max_results_per_query: 6
+    require_captions: true
+    creative_commons_only: false
+
+  - id: psychology_explained
+    enabled: true
+    display_name: Psychology Explained
+    search_queries:
+      - "cognitive bias explained"
+      - "habits psychology explained"
+      - "motivation psychology podcast"
+    exclude_keywords:
+      - "asmr"
+      - "prank"
+    min_duration_sec: 1200
+    max_duration_sec: 7200
+    min_view_count: 50000
+    max_results_per_query: 6
+    require_captions: true
+    creative_commons_only: false
+
   - id: game_of_thrones
     enabled: false
     display_name: Game of Thrones
@@ -38,7 +90,7 @@ pipeline:
   discover_interval_minutes: 720
   process_interval_minutes: 60
   publish_interval_minutes: 240
-  max_publishes_per_day: 3
+  max_publishes_per_day: 10
   clip_min_seconds: 18
   clip_max_seconds: 45
   jitter_seconds_min: 30
@@ -53,10 +105,15 @@ pipeline:
   llm_provider: gemini
   gemini_model: gemini-flash-lite-latest
   ollama_model: llama3.2
-  max_llm_highlights_per_day: 5
+  max_llm_highlights_per_day: 25
   # Quality gate + captions (Shorts polish upgrade)
   min_clip_score: 70
   enable_verifier: true
+  verifier_soft_floor: 55
   burn_captions: true
   snap_to_sentences: true
   snap_whisper_model: base
+  # Multi-Shorts from long sources
+  max_clips_per_source: 10
+  clip_min_gap_sec: 30
+  picker_chunk_sec: 900

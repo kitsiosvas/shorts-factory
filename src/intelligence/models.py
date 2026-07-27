@@ -40,6 +40,15 @@ class Transcript:
         ]
         return " ".join(parts)
 
+    def slice_between(self, start: float, end: float) -> Transcript:
+        """Return a transcript containing only segments overlapping [start, end)."""
+        segs = [
+            s
+            for s in self.segments
+            if s.end > start and s.start < end and s.text.strip()
+        ]
+        return Transcript(segments=segs, source=self.source)
+
 
 @dataclass
 class HighlightClip:

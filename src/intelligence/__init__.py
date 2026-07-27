@@ -2,6 +2,7 @@ from src.intelligence.highlights import (
     estimate_gemini_cost_usd,
     pick_highlights,
     rough_token_estimate,
+    select_non_overlapping,
 )
 from src.intelligence.models import HighlightClip, Transcript, TranscriptSegment
 from src.intelligence.transcribe import get_transcript
@@ -14,4 +15,5 @@ __all__ = [
     "get_transcript",
     "pick_highlights",
     "rough_token_estimate",
+    "select_non_overlapping",
 ]

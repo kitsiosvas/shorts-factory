@@ -188,7 +188,11 @@ def snap_clip_to_sentences(
         end_idx = start_idx
         snap_end = sentences[start_idx].end
 
-    # Enforce max duration: drop trailing sentences while >= min_sec
+    # Enforce max duration: prefer dropping lead-in (preserve payoff/end).
+    while start_idx < end_idx and (snap_end - snap_start) > max_sec:
+        start_idx += 1
+        snap_start = sentences[start_idx].start
+    # Last resort: trim the end if still over budget.
     while end_idx > start_idx and (snap_end - snap_start) > max_sec:
         end_idx -= 1
         snap_end = sentences[end_idx].end

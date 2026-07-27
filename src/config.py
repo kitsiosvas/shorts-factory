@@ -46,9 +46,13 @@ class PipelineConfig(BaseModel):
     use_youtube_captions: bool = True
     min_clip_score: int = 70
     enable_verifier: bool = True
+    verifier_soft_floor: int = 55
     burn_captions: bool = True
     snap_to_sentences: bool = True
     snap_whisper_model: str = "base"
+    max_clips_per_source: int = 10
+    clip_min_gap_sec: int = 30
+    picker_chunk_sec: int = 900
 
 
 class TopicsFile(BaseModel):

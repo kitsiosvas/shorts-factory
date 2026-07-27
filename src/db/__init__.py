@@ -18,6 +18,12 @@ class JobStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+class RenderStatus(StrEnum):
+    RENDERED = "rendered"
+    PUBLISHED = "published"
+    FAILED = "failed"
+
+
 @dataclass
 class Source:
     id: int
@@ -42,6 +48,23 @@ class Source:
 
 
 @dataclass
+class Render:
+    id: int
+    source_id: int
+    clip_index: int
+    start_sec: float
+    end_sec: float
+    ready_path: str | None
+    generated_title: str | None
+    generated_description: str | None
+    verifier_score: float | None
+    status: str
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass
 class Post:
     id: int
     source_id: int
@@ -50,6 +73,7 @@ class Post:
     status: str
     error: str | None
     created_at: str
+    render_id: int | None = None
 
 
 SCHEMA = """
@@ -75,6 +99,23 @@ CREATE TABLE IF NOT EXISTS sources (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS renders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    clip_index INTEGER NOT NULL,
+    start_sec REAL NOT NULL,
+    end_sec REAL NOT NULL,
+    ready_path TEXT,
+    generated_title TEXT,
+    generated_description TEXT,
+    verifier_score REAL,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(source_id) REFERENCES sources(id)
+);
+
 CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id INTEGER NOT NULL,
@@ -83,6 +124,7 @@ CREATE TABLE IF NOT EXISTS posts (
     status TEXT NOT NULL,
     error TEXT,
     created_at TEXT NOT NULL,
+    render_id INTEGER,
     FOREIGN KEY(source_id) REFERENCES sources(id)
 );
 
@@ -101,6 +143,10 @@ def _utcnow() -> str:
 
 def _row_to_source(row: sqlite3.Row) -> Source:
     return Source(**dict(row))
+
+
+def _row_to_render(row: sqlite3.Row) -> Render:
+    return Render(**dict(row))
 
 
 class Database:
@@ -126,6 +172,9 @@ class Database:
     def init_schema(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)")}
+            if "render_id" not in post_cols:
+                conn.execute("ALTER TABLE posts ADD COLUMN render_id INTEGER")
 
     def source_exists(self, youtube_video_id: str) -> bool:
         with self.connect() as conn:
@@ -209,6 +258,105 @@ class Database:
             retry_count=retry,
         )
 
+    def insert_render(
+        self,
+        *,
+        source_id: int,
+        clip_index: int,
+        start_sec: float,
+        end_sec: float,
+        ready_path: str | None,
+        generated_title: str | None,
+        generated_description: str | None,
+        verifier_score: float | None,
+        status: str = RenderStatus.RENDERED.value,
+        error: str | None = None,
+    ) -> int:
+        now = _utcnow()
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO renders (
+                    source_id, clip_index, start_sec, end_sec, ready_path,
+                    generated_title, generated_description, verifier_score,
+                    status, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_id,
+                    clip_index,
+                    start_sec,
+                    end_sec,
+                    ready_path,
+                    generated_title,
+                    generated_description,
+                    verifier_score,
+                    status,
+                    error,
+                    now,
+                    now,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def get_render(self, render_id: int) -> Render | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM renders WHERE id = ?", (render_id,)).fetchone()
+            return _row_to_render(row) if row else None
+
+    def next_render_by_status(self, status: RenderStatus) -> Render | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM renders
+                WHERE status = ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (status.value,),
+            ).fetchone()
+            return _row_to_render(row) if row else None
+
+    def update_render(self, render_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        fields["updated_at"] = _utcnow()
+        columns = ", ".join(f"{key} = ?" for key in fields)
+        values = list(fields.values()) + [render_id]
+        with self.connect() as conn:
+            conn.execute(f"UPDATE renders SET {columns} WHERE id = ?", values)
+
+    def list_renders_for_source(self, source_id: int) -> list[Render]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM renders
+                WHERE source_id = ?
+                ORDER BY clip_index ASC
+                """,
+                (source_id,),
+            ).fetchall()
+            return [_row_to_render(r) for r in rows]
+
+    def render_status_counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS c FROM renders GROUP BY status"
+            ).fetchall()
+            return {row["status"]: int(row["c"]) for row in rows}
+
+    def source_has_unpublished_renders(self, source_id: int) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM renders
+                WHERE source_id = ? AND status = ?
+                LIMIT 1
+                """,
+                (source_id, RenderStatus.RENDERED.value),
+            ).fetchone()
+            return row is not None
+
     def insert_post(
         self,
         *,
@@ -217,14 +365,17 @@ class Database:
         platform_post_id: str | None,
         status: str,
         error: str | None = None,
+        render_id: int | None = None,
     ) -> int:
         with self.connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO posts (source_id, platform, platform_post_id, status, error, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO posts (
+                    source_id, platform, platform_post_id, status, error, created_at, render_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (source_id, platform, platform_post_id, status, error, _utcnow()),
+                (source_id, platform, platform_post_id, status, error, _utcnow(), render_id),
             )
             return int(cur.lastrowid)
 
