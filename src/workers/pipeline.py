@@ -9,6 +9,8 @@ from src.db import Database, JobStatus
 from src.discover import discover_for_topic
 from src.ingest import download_video
 from src.intelligence import get_transcript, pick_highlights
+from src.intelligence.highlights import verify_clip_gemini
+from src.intelligence.words import snap_clip_to_sentences, transcribe_window_words
 from src.publish.youtube import YouTubePublisher
 from src.render import (
     burn_hook_text,
@@ -18,6 +20,7 @@ from src.render import (
     to_vertical_916,
 )
 from src.render.ffmpeg_utils import probe_duration
+from src.render.subtitles import segments_to_ass, words_to_ass
 
 logger = logging.getLogger(__name__)
 
@@ -163,12 +166,89 @@ class Pipeline:
                     "Source skipped rather than silence-cutting."
                 )
 
-            best = clips[0]
-            start, end = best.start_sec, best.end_sec
-            hook_from_llm = best.hook_title
             self.db.add_quota("llm", 1)
+
+            selected = None
+            rejections: list[str] = []
+            for cand in clips[:3]:
+                if cand.score < pipeline.min_clip_score:
+                    rejections.append(
+                        f"{cand.start_sec:.0f}-{cand.end_sec:.0f}s: "
+                        f"picker score {cand.score:.0f} < floor"
+                    )
+                    continue
+
+                start, end = cand.start_sec, cand.end_sec
+                clip_words: list = []
+                if pipeline.snap_to_sentences:
+                    try:
+                        words = transcribe_window_words(
+                            raw_path,
+                            start,
+                            end,
+                            model_name=pipeline.snap_whisper_model,
+                        )
+                        snapped_start, snapped_end, clip_words = snap_clip_to_sentences(
+                            words,
+                            start,
+                            end,
+                            min_sec=float(pipeline.clip_min_seconds),
+                            max_sec=float(pipeline.clip_max_seconds),
+                        )
+                        logger.info(
+                            "Snap %.1f-%.1fs -> %.1f-%.1fs (%d words)",
+                            start,
+                            end,
+                            snapped_start,
+                            snapped_end,
+                            len(clip_words),
+                        )
+                        start, end = snapped_start, snapped_end
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Sentence snapping failed; using raw LLM bounds"
+                        )
+
+                clip_text = (
+                    " ".join(w.text for w in clip_words)
+                    if clip_words
+                    else transcript.text_between(start, end)
+                )
+
+                if pipeline.enable_verifier and pipeline.llm_provider == "gemini":
+                    v = verify_clip_gemini(
+                        clip_text,
+                        api_key=self.settings.gemini_api_key or "",
+                        model=pipeline.gemini_model,
+                    )
+                    logger.info(
+                        "Verifier %.0f-%.0fs verdict=%s score=%.0f issues=%s",
+                        start,
+                        end,
+                        v["verdict"],
+                        v["score"],
+                        v["issues"],
+                    )
+                    if v["verdict"] != "pass" or (
+                        0 <= v["score"] < pipeline.min_clip_score
+                    ):
+                        rejections.append(
+                            f"{start:.0f}-{end:.0f}s: verifier {v['verdict']} "
+                            f"score={v['score']:.0f} ({v['issues']})"
+                        )
+                        continue
+
+                selected = (cand, start, end, clip_words)
+                break
+
+            if selected is None:
+                logger.warning("All candidates rejected: %s", rejections)
+                raise RuntimeError(f"All candidate clips rejected: {rejections}")
+
+            best, start, end, clip_words = selected
+            hook_from_llm = best.hook_title
             logger.info(
-                "LLM highlight %.1f-%.1fs score=%.0f cost~$%s provider=%s reason=%s",
+                "Selected highlight %.1f-%.1fs score=%.0f cost~$%s provider=%s reason=%s",
                 start,
                 end,
                 best.score,
@@ -176,6 +256,8 @@ class Pipeline:
                 highlight_meta.get("provider"),
                 best.reason[:120],
             )
+            if rejections:
+                logger.info("Earlier rejections: %s", rejections)
 
             clip_path = self.settings.media_raw_dir / f"{source.youtube_video_id}_clip.mp4"
             start, end = extract_clip(
@@ -186,8 +268,23 @@ class Pipeline:
                 end_sec=end,
             )
 
+            ass_path = None
+            if pipeline.burn_captions:
+                ass_path = (
+                    self.settings.media_raw_dir / f"{source.youtube_video_id}_subs.ass"
+                )
+                if clip_words:
+                    words_to_ass(clip_words, clip_start=start, output_path=ass_path)
+                else:
+                    segments_to_ass(
+                        transcript.segments,
+                        clip_start=start,
+                        clip_end=end,
+                        output_path=ass_path,
+                    )
+
             vertical_path = self.settings.media_raw_dir / f"{source.youtube_video_id}_vert.mp4"
-            to_vertical_916(clip_path, vertical_path)
+            to_vertical_916(clip_path, vertical_path, ass_path=ass_path)
 
             title = generate_hook_title(hook_from_llm or source.title, None)
             description = generate_description(source.title, source.url, topic_name)
@@ -205,8 +302,8 @@ class Pipeline:
                 generated_description=description,
                 error=None,
             )
-            for temp in (clip_path, vertical_path):
-                if temp.exists():
+            for temp in (clip_path, vertical_path, ass_path):
+                if temp is not None and temp.exists():
                     temp.unlink(missing_ok=True)
 
             return {
@@ -216,6 +313,7 @@ class Pipeline:
                 "title": title,
                 "clip": {"start": start, "end": end},
                 "highlight": highlight_meta,
+                "rejections": rejections,
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("Process failed source_id=%s", source.id)

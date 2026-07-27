@@ -13,7 +13,7 @@ def extract_clip(
     output_path: Path,
     *,
     max_seconds: float = 45.0,
-    fade_seconds: float = 0.45,
+    fade_seconds: float = 0.20,
     start_sec: float | None = None,
     end_sec: float | None = None,
 ) -> tuple[float, float]:

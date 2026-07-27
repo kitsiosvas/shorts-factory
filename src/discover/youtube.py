@@ -42,19 +42,20 @@ def discover_for_topic(topic: TopicConfig, *, api_key: str | None = None) -> lis
 
     for query in topic.search_queries:
         logger.info("Discover query=%r topic=%s", query, topic.id)
-        search = (
-            youtube.search()
-            .list(
-                q=query,
-                part="id,snippet",
-                type="video",
-                order="viewCount",
-                maxResults=topic.max_results_per_query,
-                videoDuration="medium",
-                relevanceLanguage="en",
-            )
-            .execute()
-        )
+        search_kwargs: dict = {
+            "q": query,
+            "part": "id,snippet",
+            "type": "video",
+            "order": "viewCount",
+            "maxResults": topic.max_results_per_query,
+            "videoDuration": "medium",
+            "relevanceLanguage": "en",
+        }
+        if topic.require_captions:
+            search_kwargs["videoCaption"] = "closedCaption"
+        if topic.creative_commons_only:
+            search_kwargs["videoLicense"] = "creativeCommon"
+        search = youtube.search().list(**search_kwargs).execute()
         video_ids = [
             item["id"]["videoId"]
             for item in search.get("items", [])

@@ -48,6 +48,8 @@ class HighlightClip:
     hook_title: str
     reason: str = ""
     score: float = 0.0
+    first_sentence: str = ""
+    last_sentence: str = ""
 
     @property
     def duration(self) -> float:

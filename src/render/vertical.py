@@ -4,11 +4,17 @@ import logging
 from pathlib import Path
 
 from src.render.ffmpeg_utils import run_ffmpeg
+from src.render.subtitles import ass_filter_arg
 
 logger = logging.getLogger(__name__)
 
 
-def to_vertical_916(input_path: Path, output_path: Path) -> Path:
+def to_vertical_916(
+    input_path: Path,
+    output_path: Path,
+    *,
+    ass_path: Path | None = None,
+) -> Path:
     """Fit full frame into 1080x1920 with blurred background (no hard crop of content)."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Verticalizing %s (blur-pad)", input_path.name)
@@ -20,6 +26,8 @@ def to_vertical_916(input_path: Path, output_path: Path) -> Path:
         "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
     )
+    if ass_path is not None:
+        fc = f"{fc},{ass_filter_arg(ass_path)}"
     run_ffmpeg(
         [
             "-i",

@@ -12,27 +12,58 @@ from src.intelligence.models import HighlightClip, Transcript
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are an expert short-form video editor for YouTube Shorts.
-Given a timestamped transcript, pick the BEST self-contained clip for a Short.
+Given a timestamped transcript, pick up to 3 candidate clips (best first) for a Short.
 
-Rules:
-- The clip MUST make sense alone (clear setup + payoff).
-- Prefer a strong hook in the first 3 seconds of the clip.
-- Do NOT cut mid-sentence if timestamps allow.
-- Duration MUST be between {min_sec:.0f} and {max_sec:.0f} seconds.
-- Avoid intros, outros, ads, subscribe CTAs, and dead air.
-- Return ONLY valid JSON (no markdown) with this shape:
+A clip is ONLY acceptable if ALL of these hold:
+- Self-contained: a viewer with ZERO context understands it fully. No dangling
+  references ("as I said earlier", "this" with no antecedent, setups answered
+  outside the clip).
+- Hook: the FIRST spoken sentence grabs attention on its own (question, bold
+  claim, surprising fact). The viewer decides to stay within 3 seconds.
+- Payoff: the clip ends on a completed thought, answer, or punchline — never
+  on a trailing setup or an unfinished list.
+- Boundaries: start_sec is the start of a sentence, end_sec is the end of a
+  sentence. Never cut mid-sentence.
+- Duration between {min_sec:.0f} and {max_sec:.0f} seconds.
+- No channel intros, outros, ads, sponsor reads, subscribe CTAs, or dead air.
+
+If NOTHING in the transcript qualifies, return {{"clips": []}}.
+Do NOT force a weak pick — an empty result is better than a mediocre clip.
+
+Return ONLY valid JSON (no markdown) with this shape:
 {{
   "clips": [
     {{
       "start_sec": 12.5,
       "end_sec": 48.0,
+      "first_sentence": "verbatim first sentence spoken in the clip",
+      "last_sentence": "verbatim last sentence spoken in the clip",
       "hook_title": "Short punchy title under 70 chars",
-      "reason": "why this works as a Short",
+      "reason": "why this works as a standalone Short",
       "score": 0-100
     }}
   ]
 }}
-Return 1 clip only (highest score).
+Score harshly: 90+ only for exceptional clips, below 60 means "should not be
+published". Order clips by score descending. Return at most 3 clips.
+"""
+
+VERIFIER_PROMPT = """You are a strict quality gate for YouTube Shorts clips.
+Below is the complete spoken text of a candidate clip, exactly what the viewer
+will hear. The viewer has NO other context.
+
+FAIL the clip if any of these are true:
+- It starts mid-thought or references context that is not in the text.
+- The first sentence is not a hook (nothing that makes a stranger keep watching).
+- It ends without a payoff (trailing setup, unfinished idea, cut-off list).
+- It is rambling, repetitive, or boring as a standalone 20-45 second video.
+
+Return ONLY valid JSON (no markdown):
+{"score": 0-100, "verdict": "pass" or "fail", "issues": "one short sentence"}
+
+Score harshly: pass only clips you would publish on your own channel.
+
+Clip text:
 """
 
 
@@ -82,6 +113,8 @@ def _parse_clips(payload: dict[str, Any], *, video_duration: float, max_sec: flo
                 hook_title=str(item.get("hook_title") or "Interesting moment").strip(),
                 reason=str(item.get("reason") or "").strip(),
                 score=float(item.get("score") or 0),
+                first_sentence=str(item.get("first_sentence") or "").strip(),
+                last_sentence=str(item.get("last_sentence") or "").strip(),
             )
         )
     clips.sort(key=lambda c: c.score, reverse=True)
@@ -98,28 +131,18 @@ GEMINI_MODEL_FALLBACKS = (
 )
 
 
-def pick_highlights_gemini(
-    transcript: Transcript,
+def _gemini_generate_json(
+    user_prompt: str,
     *,
     api_key: str,
     model: str,
-    video_duration: float,
-    min_sec: float,
-    max_sec: float,
-    topic_name: str,
-) -> tuple[list[HighlightClip], dict[str, Any]]:
-    body_transcript = transcript.as_numbered_lines()
-    system = SYSTEM_PROMPT.format(min_sec=min_sec, max_sec=max_sec)
-    user_prompt = (
-        f"{system}\n\n"
-        f"Topic niche: {topic_name}\n"
-        f"Video duration: {video_duration:.1f}s\n\n"
-        f"Transcript:\n{body_transcript}"
-    )
+    temperature: float = 0.3,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Call Gemini generateContent (with model fallbacks) and parse JSON output."""
     payload = {
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
         "generationConfig": {
-            "temperature": 0.3,
+            "temperature": temperature,
             "responseMimeType": "application/json",
         },
     }
@@ -190,9 +213,60 @@ def pick_highlights_gemini(
             6,
         ),
     }
-    parsed = _extract_json(text)
+    return _extract_json(text), meta
+
+
+def pick_highlights_gemini(
+    transcript: Transcript,
+    *,
+    api_key: str,
+    model: str,
+    video_duration: float,
+    min_sec: float,
+    max_sec: float,
+    topic_name: str,
+) -> tuple[list[HighlightClip], dict[str, Any]]:
+    body_transcript = transcript.as_numbered_lines()
+    system = SYSTEM_PROMPT.format(min_sec=min_sec, max_sec=max_sec)
+    user_prompt = (
+        f"{system}\n\n"
+        f"Topic niche: {topic_name}\n"
+        f"Video duration: {video_duration:.1f}s\n\n"
+        f"Transcript:\n{body_transcript}"
+    )
+    parsed, meta = _gemini_generate_json(user_prompt, api_key=api_key, model=model)
     clips = _parse_clips(parsed, video_duration=video_duration, max_sec=max_sec)
     return clips, meta
+
+
+def verify_clip_gemini(
+    clip_text: str,
+    *,
+    api_key: str,
+    model: str,
+) -> dict[str, Any]:
+    """Second-pass quality gate: judge the clip's spoken text in isolation.
+
+    Returns {"score": float, "verdict": "pass"|"fail", "issues": str, "meta": dict}.
+    On API/parse failure the clip is passed through (gate fails open) so a flaky
+    verifier cannot stall the whole pipeline.
+    """
+    try:
+        parsed, meta = _gemini_generate_json(
+            VERIFIER_PROMPT + clip_text.strip(),
+            api_key=api_key,
+            model=model,
+            temperature=0.0,
+        )
+        return {
+            "score": float(parsed.get("score") or 0),
+            "verdict": str(parsed.get("verdict") or "fail").lower().strip(),
+            "issues": str(parsed.get("issues") or "").strip(),
+            "meta": meta,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Clip verifier failed (%s); passing clip through", exc)
+        return {"score": -1.0, "verdict": "pass", "issues": f"verifier error: {exc}", "meta": {}}
 
 
 def pick_highlights_ollama(

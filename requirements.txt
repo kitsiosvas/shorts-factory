@@ -11,4 +11,5 @@ google-api-python-client==2.169.0
 google-auth-oauthlib==1.2.2
 google-auth-httplib2==0.2.0
 Pillow==11.2.1
+faster-whisper
 # Optional captions: pip install setuptools openai-whisper

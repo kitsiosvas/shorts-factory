@@ -21,6 +21,8 @@ class TopicConfig(BaseModel):
     max_duration_sec: int = 1200
     min_view_count: int = 50_000
     max_results_per_query: int = 8
+    require_captions: bool = True
+    creative_commons_only: bool = False
 
 
 class PipelineConfig(BaseModel):
@@ -42,6 +44,11 @@ class PipelineConfig(BaseModel):
     ollama_model: str = "llama3.2"
     max_llm_highlights_per_day: int = 5
     use_youtube_captions: bool = True
+    min_clip_score: int = 70
+    enable_verifier: bool = True
+    burn_captions: bool = True
+    snap_to_sentences: bool = True
+    snap_whisper_model: str = "base"
 
 
 class TopicsFile(BaseModel):
