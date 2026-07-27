@@ -1,0 +1,52 @@
+# Shorts Factory topic config
+# enabled: false pauses all work for that topic (kill-switch)
+
+topics:
+  - id: medicine
+    enabled: true
+    display_name: Medicine Facts
+    search_queries:
+      - "medical explanation"
+      - "how the body works"
+      - "doctor explains"
+    exclude_keywords:
+      - "asmr"
+      - "prank"
+    min_duration_sec: 180
+    max_duration_sec: 1200
+    min_view_count: 50000
+    max_results_per_query: 8
+
+  - id: game_of_thrones
+    enabled: false
+    display_name: Game of Thrones
+    search_queries:
+      - "game of thrones explained"
+      - "got lore"
+    exclude_keywords:
+      - "reaction only"
+    min_duration_sec: 180
+    max_duration_sec: 1200
+    min_view_count: 100000
+    max_results_per_query: 8
+
+pipeline:
+  discover_interval_minutes: 720
+  process_interval_minutes: 60
+  publish_interval_minutes: 240
+  max_publishes_per_day: 3
+  clip_min_seconds: 18
+  clip_max_seconds: 45
+  jitter_seconds_min: 30
+  jitter_seconds_max: 180
+  youtube_daily_quota_budget: 8000
+  upload_quota_cost: 1600
+  # Transcript: YouTube captions first; Whisper only if captions missing
+  use_youtube_captions: true
+  use_whisper: false
+  whisper_model: tiny
+  # Highlight picker REQUIRED: gemini | ollama (silence-based cutting removed)
+  llm_provider: gemini
+  gemini_model: gemini-flash-lite-latest
+  ollama_model: llama3.2
+  max_llm_highlights_per_day: 5

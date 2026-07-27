@@ -1,0 +1,10 @@
+yt-dlp
+fastapi
+uvicorn
+instagrapi
+pillow
+moviepy
+httpx
+apscheduler
+pydantic-settings
+python-dotenv
