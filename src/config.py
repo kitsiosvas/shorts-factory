@@ -76,6 +76,8 @@ class PipelineConfig(BaseModel):
     owned_max_words: int = 110
     owned_enable_bumper: bool = True
     owned_min_script_novelty: float = 0.40
+    # When false (default), kinetic word-reveal carries text (no stacked ASS)
+    owned_burn_karaoke: bool = False
 
 
 class TopicsFile(BaseModel):

@@ -143,3 +143,5 @@ pipeline:
   owned_max_words: 110
   owned_enable_bumper: true
   owned_min_script_novelty: 0.40
+  # Kinetic cards already reveal VO text; set true to also burn ASS karaoke
+  owned_burn_karaoke: false

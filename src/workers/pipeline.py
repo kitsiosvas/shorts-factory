@@ -867,11 +867,15 @@ class Pipeline:
                 self.settings.media_raw_dir / f"owned_{source.youtube_video_id}_kinetic.mp4"
             )
             content_dur = render_kinetic_video(
-                plan, vo_path, kinetic_path, max_seconds=max_content
+                plan,
+                vo_path,
+                kinetic_path,
+                max_seconds=max_content,
+                words=vo_words,
             )
 
             hook_input = kinetic_path
-            if pipeline.burn_captions:
+            if pipeline.burn_captions and pipeline.owned_burn_karaoke:
                 ass_path = (
                     self.settings.media_raw_dir
                     / f"owned_{source.youtube_video_id}_subs.ass"

@@ -27,10 +27,12 @@ Discovery queries favor animation / whiteboard / podcast-explainer sources. Set 
 
 ## Owned templates (parallel A/B path)
 
-Pivot v1: discovery/transcript is **research only**; visuals are our kinetic cards (Pillow + ffmpeg), not third-party frames.
+Pivot v1+: discovery/transcript is **research only**; visuals are animated kinetic
+cards (Pillow frames + Ken Burns / word reveal), not third-party frames.
+Remotion can consume the same scene JSON later.
 
 1. Same discover/download (captions as research).
-2. `POST /process-owned-next` → Gemini research brief → owned VO script → edge-tts → beat cards timed to VO → karaoke + optional bumpers → `media/ready/owned_{video_id}.mp4`.
+2. `POST /process-owned-next` → Gemini research brief → owned VO script → edge-tts → animated beat cards timed to VO words → optional karaoke (`owned_burn_karaoke`) + bumpers → `media/ready/owned_{video_id}.mp4`.
 3. Scene JSON is written to `media/raw/owned_{id}_scenes.json` (stable schema for a future Remotion compositor).
 4. Clip factory stays on `/process-next`. Same `source_id` can produce both `renders.kind=clip` and `kind=owned` for A/B.
 
@@ -40,7 +42,7 @@ Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8010/process-owned-next `
   -ContentType application/json -Body '{"source_id": 1}'
 ```
 
-Knobs: `owned_max_words`, `owned_enable_bumper`, `owned_min_script_novelty`.
+Knobs: `owned_max_words`, `owned_enable_bumper`, `owned_min_script_novelty`, `owned_burn_karaoke` (default false — cards reveal VO text).
 
 ## Topics
 

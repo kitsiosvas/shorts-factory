@@ -225,3 +225,12 @@ words_to_ass`.
   render; source marked failed with the rejection reasons.
 - Burned word-timed captions present when `burn_captions: true`.
 - Discovery only returns captioned videos when `require_captions: true`.
+
+---
+
+## Owned kinetic v2 (Python motion; Remotion later)
+
+Shipped after Pivot v1: `src/render/kinetic.py` renders per-beat Pillow frame
+sequences (Ken Burns, slide/punch, progressive bullets, VO word reveal).
+`owned_burn_karaoke` defaults to false so cards are not stacked with ASS karaoke.
+Scene JSON schema unchanged for a future Remotion compositor.
