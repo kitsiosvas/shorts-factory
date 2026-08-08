@@ -105,6 +105,35 @@ def transcribe_window_words(
         return words
 
 
+def transcribe_audio_words(
+    audio_path: Path,
+    *,
+    model_name: str = "base",
+) -> list[Word]:
+    """Word-level timestamps for a standalone audio file (e.g. TTS VO)."""
+    model = _get_model(model_name)
+    segments, _info = model.transcribe(
+        str(audio_path),
+        word_timestamps=True,
+        language="en",
+        vad_filter=True,
+    )
+    words: list[Word] = []
+    for segment in segments:
+        for w in segment.words or []:
+            text = (w.word or "").strip()
+            if not text:
+                continue
+            words.append(
+                Word(
+                    start=float(w.start),
+                    end=float(w.end),
+                    text=text,
+                )
+            )
+    return words
+
+
 def build_sentences(words: list[Word]) -> list[Sentence]:
     """Split words into sentences on punctuation or long gaps."""
     if not words:

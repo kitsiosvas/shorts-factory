@@ -30,9 +30,19 @@ def get_credentials() -> Credentials:
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
 
     if not creds or not creds.valid:
+        refreshed = False
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+                refreshed = True
+            except Exception as exc:  # noqa: BLE001 — invalid_grant etc. → re-auth
+                logger.warning("YouTube token refresh failed (%s); starting OAuth again", exc)
+                creds = None
+                try:
+                    token_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        if not refreshed:
             if not secrets_path.exists():
                 raise FileNotFoundError(
                     f"Missing YouTube OAuth client secrets at {secrets_path}. "

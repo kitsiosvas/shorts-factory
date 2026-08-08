@@ -53,6 +53,29 @@ class PipelineConfig(BaseModel):
     max_clips_per_source: int = 10
     clip_min_gap_sec: int = 30
     picker_chunk_sec: int = 900
+    # Originality / narration (mute source + TTS VO rewrite)
+    enable_narration: bool = False
+    # auto: classify frame; talking_head rejected when reject_talking_heads
+    narration_routing: Literal["auto", "always_vo", "always_source"] = "auto"
+    reject_talking_heads: bool = True
+    narration_mode: Literal["mute_source_vo"] = "mute_source_vo"
+    tts_provider: Literal["edge_tts"] = "edge_tts"
+    tts_voice: str = "en-US-AndrewNeural"
+    narration_max_words: int = 110
+    min_script_novelty: float = 0.45
+    talking_head_motion: bool = True
+    talking_head_zoom_end: float = 1.08
+    # Brand cards on VO clips only (intro + outro)
+    enable_brand_bumper: bool = True
+    brand_name: str | None = None  # default: topic display_name
+    bumper_intro_sec: float = 0.75
+    bumper_outro_sec: float = 0.9
+    bumper_intro_tagline: str = "facts in under a minute"
+    bumper_outro_tagline: str = "thanks for watching"
+    # Owned-template parallel path (/process-owned-next)
+    owned_max_words: int = 110
+    owned_enable_bumper: bool = True
+    owned_min_script_novelty: float = 0.40
 
 
 class TopicsFile(BaseModel):
@@ -84,6 +107,9 @@ class Settings(BaseSettings):
     # LLM keys / endpoints (choose provider in topics.yaml)
     gemini_api_key: str | None = None
     ollama_base_url: str = "http://127.0.0.1:11434"
+    # yt-dlp YouTube bot-check bypass (cookies)
+    ytdlp_cookies_from_browser: str | None = None  # chrome | edge | firefox
+    ytdlp_cookies_file: Path | None = None
 
     def ensure_dirs(self) -> None:
         for path in (

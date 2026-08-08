@@ -12,6 +12,13 @@ class DiscoverRequest(BaseModel):
     topic_id: str | None = Field(default=None, description="Optional single topic id")
 
 
+class ProcessOwnedRequest(BaseModel):
+    source_id: int | None = Field(
+        default=None, description="Optional source for A/B on a specific video"
+    )
+    topic_id: str | None = Field(default=None, description="Optional topic filter")
+
+
 class UploadTestRequest(BaseModel):
     video_path: str
     title: str = "Test Short #Shorts"
@@ -33,6 +40,21 @@ def discover(body: DiscoverRequest | None = None) -> dict:
 @router.post("/process-next")
 def process_next() -> dict:
     return _pipeline().process_next()
+
+
+@router.post("/process-owned-next")
+def process_owned_next(body: ProcessOwnedRequest | None = None) -> dict:
+    """Owned kinetic Shorts path (research brief → TTS → templates). A/B vs /process-next."""
+    body = body or ProcessOwnedRequest()
+    result = _pipeline().process_owned_next(
+        source_id=body.source_id,
+        topic_id=body.topic_id,
+    )
+    if result.get("status") == "failed" and result.get("error"):
+        # Idle/skipped/budget stay 200; hard failures → 400 for easier clients
+        if result.get("source_id") is None and "requires" in str(result.get("error")):
+            raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @router.post("/publish-next")

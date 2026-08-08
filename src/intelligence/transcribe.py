@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yt_dlp
 
+from src.ingest.yt_cookies import apply_youtube_auth, apply_ytdlp_runtime
 from src.intelligence.models import Transcript, TranscriptSegment
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,34 @@ def _parse_vtt(content: str) -> list[TranscriptSegment]:
 def fetch_youtube_captions(video_id: str, work_dir: Path) -> Transcript | None:
     """Download auto/manual English captions via yt-dlp (free, no Whisper)."""
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    def _load_existing() -> Transcript | None:
+        candidates = sorted(work_dir.glob(f"{video_id}*.vtt"))
+        if not candidates:
+            return None
+        preferred = sorted(
+            candidates,
+            key=lambda p: (
+                0 if ".en." in p.name or p.name.endswith(".en.vtt") else 1,
+                len(p.name),
+            ),
+        )
+        content = preferred[0].read_text(encoding="utf-8", errors="ignore")
+        segments = _parse_vtt(content)
+        if not segments:
+            return None
+        logger.info(
+            "Loaded %s caption segments from %s (%s)",
+            len(segments),
+            preferred[0].name,
+            video_id,
+        )
+        return Transcript(segments=segments, source="youtube_captions")
+
+    existing = _load_existing()
+    if existing is not None:
+        return existing
+
     outtmpl = str(work_dir / f"{video_id}.%(ext)s")
     ydl_opts = {
         "skip_download": True,
@@ -77,38 +106,21 @@ def fetch_youtube_captions(video_id: str, work_dir: Path) -> Transcript | None:
         "quiet": True,
         "no_warnings": True,
     }
+    apply_youtube_auth(ydl_opts)
+    apply_ytdlp_runtime(ydl_opts)
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except Exception as exc:  # noqa: BLE001
         logger.warning("YouTube captions download failed for %s: %s", video_id, exc)
-        return None
+        # Fall through — a concurrent/partial file may still exist.
+        return _load_existing()
 
-    candidates = sorted(work_dir.glob(f"{video_id}*.vtt"))
-    if not candidates:
+    loaded = _load_existing()
+    if loaded is None:
         logger.info("No VTT captions found for %s", video_id)
-        return None
-
-    # Prefer manual en over auto if both exist (filename heuristics)
-    preferred = sorted(
-        candidates,
-        key=lambda p: (
-            0 if ".en." in p.name or p.name.endswith(".en.vtt") else 1,
-            len(p.name),
-        ),
-    )
-    content = preferred[0].read_text(encoding="utf-8", errors="ignore")
-    segments = _parse_vtt(content)
-    if not segments:
-        return None
-    logger.info(
-        "Loaded %s caption segments from %s (%s)",
-        len(segments),
-        preferred[0].name,
-        video_id,
-    )
-    return Transcript(segments=segments, source="youtube_captions")
+    return loaded
 
 
 def transcribe_whisper_segments(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
 import shutil
 from pathlib import Path
 
@@ -10,8 +12,23 @@ from src.discover import discover_for_topic
 from src.ingest import download_video
 from src.intelligence import get_transcript, pick_highlights
 from src.intelligence.highlights import verify_clip_gemini
-from src.intelligence.models import HighlightClip
-from src.intelligence.words import Word, snap_clip_to_sentences, transcribe_window_words
+from src.intelligence.models import HighlightClip, TranscriptSegment
+from src.intelligence.narration import write_narration_script
+from src.intelligence.owned_brief import (
+    extract_research_brief,
+    write_owned_narration_script,
+)
+from src.intelligence.scene_plan import (
+    assign_beat_times_from_words,
+    build_scene_plan,
+)
+from src.intelligence.visual_mode import classify_visual_mode
+from src.intelligence.words import (
+    Word,
+    snap_clip_to_sentences,
+    transcribe_audio_words,
+    transcribe_window_words,
+)
 from src.publish.youtube import YouTubePublisher
 from src.render import (
     burn_hook_text,
@@ -20,8 +37,15 @@ from src.render import (
     generate_hook_title,
     to_vertical_916,
 )
-from src.render.ffmpeg_utils import probe_duration
-from src.render.subtitles import segments_to_ass, words_to_ass
+from src.render.audio_mix import mux_vo_over_video
+from src.render.bumper import wrap_with_bumpers
+from src.render.ffmpeg_utils import probe_duration, run_ffmpeg
+from src.render.kinetic import render_kinetic_video
+from src.render.motion import apply_subtle_zoom
+from src.render.subtitles import ass_filter_arg, segments_to_ass, words_to_ass
+from src.render.tts import synthesize_speech
+
+OWNED_CLIP_INDEX = 900
 
 logger = logging.getLogger(__name__)
 
@@ -337,13 +361,169 @@ class Pipeline:
                     end_sec=end,
                 )
 
+                clip_text = (
+                    " ".join(w.text for w in clip_words)
+                    if clip_words
+                    else transcript.text_between(start, end)
+                )
+                narration_script = None
+                vo_path = None
+                vo_words: list[Word] = []
+                mixed_path = None
+                motion_path = None
+                bumper_path = None
+                render_input = clip_path
+                visual_mode = "broll"
+                use_vo = False
+
+                needs_classify = (
+                    pipeline.reject_talking_heads
+                    or (
+                        pipeline.enable_narration
+                        and (pipeline.narration_routing or "auto").lower().strip()
+                        == "auto"
+                    )
+                )
+                if needs_classify or pipeline.enable_narration:
+                    if pipeline.llm_provider != "gemini" or not self.settings.gemini_api_key:
+                        raise RuntimeError(
+                            "visual routing / narration requires llm_provider=gemini "
+                            "and GEMINI_API_KEY"
+                        )
+
+                routing = (pipeline.narration_routing or "auto").lower().strip()
+                if routing == "always_vo":
+                    visual_mode = "broll"
+                elif routing == "always_source":
+                    visual_mode = "talking_head"
+                elif needs_classify:
+                    visual_mode, vm_meta = classify_visual_mode(
+                        clip_path,
+                        start_sec=0.0,
+                        end_sec=max(end - start, 1.0),
+                        clip_text=clip_text,
+                        api_key=self.settings.gemini_api_key or "",
+                        model=pipeline.gemini_model,
+                    )
+                    logger.info(
+                        "Clip %d visual_mode=%s (%s)",
+                        clip_index,
+                        visual_mode,
+                        vm_meta.get("reason") or vm_meta.get("error") or "",
+                    )
+
+                if pipeline.reject_talking_heads and visual_mode == "talking_head":
+                    reason = (
+                        f"{start:.0f}-{end:.0f}s: rejected talking_head "
+                        "(want animation/diagram/B-roll only)"
+                    )
+                    rejections.append(reason)
+                    logger.info("Skipping clip %d: %s", clip_index, reason)
+                    if clip_path.exists():
+                        clip_path.unlink(missing_ok=True)
+                    continue
+
+                use_vo = pipeline.enable_narration and visual_mode == "broll"
+
+                if use_vo:
+                    try:
+                        narration_script, narr_meta = write_narration_script(
+                            clip_text,
+                            topic_name=topic_name,
+                            hook_title=cand.hook_title,
+                            api_key=self.settings.gemini_api_key or "",
+                            model=pipeline.gemini_model,
+                            max_words=pipeline.narration_max_words,
+                            min_novelty=pipeline.min_script_novelty,
+                        )
+                        logger.info(
+                            "Narration novelty=%.2f words=%d: %s",
+                            float(narr_meta.get("novelty") or 0),
+                            narration_script.word_count,
+                            narration_script.full_text[:120],
+                        )
+                        vo_path = (
+                            self.settings.media_raw_dir
+                            / f"{source.youtube_video_id}{suffix}_vo.mp3"
+                        )
+                        synthesize_speech(
+                            narration_script.full_text,
+                            vo_path,
+                            voice=pipeline.tts_voice,
+                        )
+                        mixed_path = (
+                            self.settings.media_raw_dir
+                            / f"{source.youtube_video_id}{suffix}_vo_clip.mp4"
+                        )
+                        bumper_budget = 0.0
+                        if pipeline.enable_brand_bumper:
+                            bumper_budget = float(pipeline.bumper_intro_sec) + float(
+                                pipeline.bumper_outro_sec
+                            )
+                        mux_vo_over_video(
+                            clip_path,
+                            vo_path,
+                            mixed_path,
+                            max_seconds=max(59.0 - bumper_budget, 50.0),
+                        )
+                        render_input = mixed_path
+                        try:
+                            vo_words = transcribe_audio_words(
+                                vo_path,
+                                model_name=pipeline.snap_whisper_model,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "VO word timestamps failed; captions will use plain lines"
+                            )
+                    except Exception as narr_exc:  # noqa: BLE001
+                        logger.warning(
+                            "Narration failed for clip %d (%.0f-%.0fs): %s",
+                            clip_index,
+                            start,
+                            end,
+                            narr_exc,
+                        )
+                        for temp in (vo_path, mixed_path, clip_path):
+                            if temp is not None and temp.exists():
+                                temp.unlink(missing_ok=True)
+                        continue
+
                 ass_path = None
                 if pipeline.burn_captions:
                     ass_path = (
                         self.settings.media_raw_dir
                         / f"{source.youtube_video_id}{suffix}_subs.ass"
                     )
-                    if clip_words:
+                    if use_vo and narration_script is not None:
+                        if vo_words:
+                            words_to_ass(vo_words, clip_start=0.0, output_path=ass_path)
+                        else:
+                            vo_dur = probe_duration(vo_path) if vo_path else 30.0
+                            chunks = [
+                                s.strip()
+                                for s in re.split(
+                                    r"(?<=[.!?])\s+",
+                                    narration_script.full_text,
+                                )
+                                if s.strip()
+                            ] or [narration_script.full_text]
+                            per = vo_dur / max(len(chunks), 1)
+                            segs = [
+                                TranscriptSegment(
+                                    start=i * per,
+                                    end=min(vo_dur, (i + 1) * per),
+                                    text=chunk,
+                                )
+                                for i, chunk in enumerate(chunks)
+                            ]
+                            segments_to_ass(
+                                segs,
+                                clip_start=0.0,
+                                clip_end=vo_dur,
+                                output_path=ass_path,
+                            )
+                    elif clip_words:
                         words_to_ass(clip_words, clip_start=start, output_path=ass_path)
                     else:
                         segments_to_ass(
@@ -357,15 +537,80 @@ class Pipeline:
                     self.settings.media_raw_dir
                     / f"{source.youtube_video_id}{suffix}_vert.mp4"
                 )
-                to_vertical_916(clip_path, vertical_path, ass_path=ass_path)
+                to_vertical_916(render_input, vertical_path, ass_path=ass_path)
 
-                title = generate_hook_title(cand.hook_title or source.title, None)
-                description = generate_description(source.title, source.url, topic_name)
+                hook_input = vertical_path
+                if (
+                    pipeline.enable_narration
+                    and not use_vo
+                    and pipeline.talking_head_motion
+                ):
+                    motion_path = (
+                        self.settings.media_raw_dir
+                        / f"{source.youtube_video_id}{suffix}_motion.mp4"
+                    )
+                    try:
+                        apply_subtle_zoom(
+                            vertical_path,
+                            motion_path,
+                            zoom_end=float(pipeline.talking_head_zoom_end),
+                        )
+                        hook_input = motion_path
+                    except Exception:
+                        logger.exception(
+                            "Talking-head motion failed; using static vertical"
+                        )
+                        motion_path = None
+
+                if narration_script is not None:
+                    title = generate_hook_title(narration_script.hook_line, None)
+                else:
+                    title = generate_hook_title(cand.hook_title or source.title, None)
+                description = generate_description(
+                    source.title,
+                    source.url,
+                    topic_name,
+                    narrated=narration_script is not None,
+                )
                 ready_path = (
                     self.settings.media_ready_dir
                     / f"{source.youtube_video_id}{suffix}.mp4"
                 )
-                burn_hook_text(vertical_path, ready_path, title)
+                burn_hook_text(hook_input, ready_path, title)
+
+                bumper_path = None
+                if use_vo and pipeline.enable_brand_bumper:
+                    brand = (pipeline.brand_name or topic_name or "Shorts").strip()
+                    bumper_path = (
+                        self.settings.media_raw_dir
+                        / f"{source.youtube_video_id}{suffix}_bumper.mp4"
+                    )
+                    try:
+                        wrap_with_bumpers(
+                            ready_path,
+                            bumper_path,
+                            brand=brand,
+                            intro_sec=float(pipeline.bumper_intro_sec),
+                            outro_sec=float(pipeline.bumper_outro_sec),
+                            intro_tagline=pipeline.bumper_intro_tagline,
+                            outro_tagline=pipeline.bumper_outro_tagline,
+                        )
+                        ready_path.unlink(missing_ok=True)
+                        shutil.move(str(bumper_path), str(ready_path))
+                        bumper_path = None
+                        logger.info(
+                            "Brand bumper applied for clip %d (%s)",
+                            clip_index,
+                            brand,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Brand bumper failed for clip %d; keeping hooked cut",
+                            clip_index,
+                        )
+                        if bumper_path is not None and bumper_path.exists():
+                            bumper_path.unlink(missing_ok=True)
+                        bumper_path = None
 
                 render_id = self.db.insert_render(
                     source_id=source.id,
@@ -387,6 +632,8 @@ class Pipeline:
                         "start": start,
                         "end": end,
                         "verifier_score": verifier_score,
+                        "narrated": narration_script is not None,
+                        "visual_mode": visual_mode,
                     }
                 )
                 if first_ready is None:
@@ -396,9 +643,27 @@ class Pipeline:
                     first_start = start
                     first_end = end
 
-                for temp in (clip_path, vertical_path, ass_path):
+                for temp in (
+                    clip_path,
+                    vertical_path,
+                    ass_path,
+                    vo_path,
+                    mixed_path,
+                    motion_path,
+                    bumper_path,
+                ):
                     if temp is not None and temp.exists():
                         temp.unlink(missing_ok=True)
+
+            if not rendered_out:
+                raise RuntimeError(
+                    "No clips rendered"
+                    + (
+                        f" (talking heads / narration failures): {rejections}"
+                        if rejections
+                        else ""
+                    )
+                )
 
             self.db.update_source(
                 source.id,
@@ -425,6 +690,338 @@ class Pipeline:
             logger.exception("Process failed source_id=%s", source.id)
             self.db.mark_failed(source.id, str(exc))
             return {"status": "failed", "source_id": source.id, "error": str(exc)}
+
+    def process_owned_next(
+        self,
+        *,
+        source_id: int | None = None,
+        topic_id: str | None = None,
+    ) -> dict:
+        """Parallel owned path: research brief → VO → kinetic templates (no B-roll)."""
+        pipeline = self.settings.pipeline()
+        if pipeline.llm_provider != "gemini" or not self.settings.gemini_api_key:
+            return {
+                "status": "failed",
+                "error": "owned path requires llm_provider=gemini and GEMINI_API_KEY",
+            }
+
+        if source_id is not None:
+            source = self.db.get_source(source_id)
+            if source is None:
+                return {"status": "failed", "error": f"source_id={source_id} not found"}
+        else:
+            source = self.db.next_source_for_owned(topic_id=topic_id)
+            if source is None:
+                # Fall back: discover queue item we can download for research
+                source = self.db.next_by_status(JobStatus.DISCOVERED)
+                if source is not None and topic_id and source.topic_id != topic_id:
+                    source = None
+            if source is None:
+                return {
+                    "status": "idle",
+                    "message": (
+                        "No source ready for owned render "
+                        "(need downloaded/rendered without owned, or discovered)"
+                    ),
+                }
+
+        if not self._topic_enabled(source.topic_id):
+            return {
+                "status": "skipped",
+                "source_id": source.id,
+                "reason": "topic disabled",
+            }
+        if self.db.source_has_owned_render(source.id):
+            return {
+                "status": "skipped",
+                "source_id": source.id,
+                "reason": "owned render already exists",
+            }
+
+        llm_used_today = self.db.get_quota_today("llm")
+        if llm_used_today >= pipeline.max_llm_highlights_per_day:
+            return {
+                "status": "budget",
+                "source_id": source.id,
+                "error": (
+                    f"LLM daily cap reached ({llm_used_today}/"
+                    f"{pipeline.max_llm_highlights_per_day})"
+                ),
+            }
+
+        topic = self._topic_by_id(source.topic_id)
+        topic_name = topic.display_name if topic else source.topic_id
+        brand = (pipeline.brand_name or topic_name or "Shorts").strip()
+
+        vo_path: Path | None = None
+        kinetic_path: Path | None = None
+        ass_path: Path | None = None
+        captioned_path: Path | None = None
+        bumper_tmp: Path | None = None
+
+        try:
+            raw_path: Path | None = None
+            if source.raw_path and Path(source.raw_path).exists():
+                raw_path = Path(source.raw_path)
+            else:
+                try:
+                    raw_path = download_video(
+                        source.url,
+                        self.settings.media_raw_dir,
+                        source.youtube_video_id,
+                    )
+                except Exception as download_exc:  # noqa: BLE001
+                    msg = str(download_exc)
+                    if "not available" in msg.lower() or "private" in msg.lower():
+                        self.db.update_source(
+                            source.id,
+                            status=JobStatus.SKIPPED.value,
+                            error=msg[:2000],
+                        )
+                        return {
+                            "status": "skipped",
+                            "source_id": source.id,
+                            "reason": "source video unavailable",
+                            "error": msg,
+                        }
+                    raise
+                self.db.update_source(
+                    source.id,
+                    status=JobStatus.DOWNLOADED.value,
+                    raw_path=str(raw_path),
+                    error=None,
+                )
+
+            transcript = get_transcript(
+                video_id=source.youtube_video_id,
+                video_path=raw_path,
+                captions_dir=self.settings.captions_dir,
+                use_whisper_fallback=pipeline.use_whisper,
+                whisper_model=pipeline.whisper_model,
+            )
+            if not transcript.segments:
+                raise RuntimeError(
+                    "No transcript available for research brief "
+                    "(YouTube captions empty; enable use_whisper or skip)."
+                )
+
+            brief, brief_meta = extract_research_brief(
+                transcript,
+                topic_name=topic_name,
+                source_title=source.title,
+                api_key=self.settings.gemini_api_key or "",
+                model=pipeline.gemini_model,
+            )
+            script, script_meta = write_owned_narration_script(
+                brief,
+                topic_name=topic_name,
+                api_key=self.settings.gemini_api_key or "",
+                model=pipeline.gemini_model,
+                max_words=pipeline.owned_max_words,
+                min_novelty=pipeline.owned_min_script_novelty,
+            )
+            self.db.add_quota("llm", 1)
+
+            plan = build_scene_plan(script, brand=brand, brief=brief)
+            scenes_json = (
+                self.settings.media_raw_dir
+                / f"owned_{source.youtube_video_id}_scenes.json"
+            )
+            brief_json = (
+                self.settings.media_raw_dir
+                / f"owned_{source.youtube_video_id}_brief.json"
+            )
+            brief_json.write_text(
+                json.dumps(brief.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            vo_path = (
+                self.settings.media_raw_dir / f"owned_{source.youtube_video_id}_vo.mp3"
+            )
+            synthesize_speech(
+                script.full_text,
+                vo_path,
+                voice=pipeline.tts_voice,
+            )
+            vo_dur = probe_duration(vo_path)
+
+            vo_words: list[Word] = []
+            try:
+                vo_words = transcribe_audio_words(
+                    vo_path, model_name=pipeline.snap_whisper_model
+                )
+            except Exception:
+                logger.exception("Owned VO word timestamps failed; equal beat split")
+
+            bumper_budget = 0.0
+            if pipeline.owned_enable_bumper:
+                bumper_budget = float(pipeline.bumper_intro_sec) + float(
+                    pipeline.bumper_outro_sec
+                )
+            max_content = max(58.0 - bumper_budget, 50.0)
+            assign_beat_times_from_words(plan, vo_words, total_duration=min(vo_dur, max_content))
+            plan.write_json(scenes_json)
+
+            kinetic_path = (
+                self.settings.media_raw_dir / f"owned_{source.youtube_video_id}_kinetic.mp4"
+            )
+            content_dur = render_kinetic_video(
+                plan, vo_path, kinetic_path, max_seconds=max_content
+            )
+
+            hook_input = kinetic_path
+            if pipeline.burn_captions:
+                ass_path = (
+                    self.settings.media_raw_dir
+                    / f"owned_{source.youtube_video_id}_subs.ass"
+                )
+                if vo_words:
+                    words_to_ass(vo_words, clip_start=0.0, output_path=ass_path)
+                else:
+                    chunks = [
+                        s.strip()
+                        for s in re.split(r"(?<=[.!?])\s+", script.full_text)
+                        if s.strip()
+                    ] or [script.full_text]
+                    per = content_dur / max(len(chunks), 1)
+                    segs = [
+                        TranscriptSegment(
+                            start=i * per,
+                            end=min(content_dur, (i + 1) * per),
+                            text=chunk,
+                        )
+                        for i, chunk in enumerate(chunks)
+                    ]
+                    segments_to_ass(
+                        segs,
+                        clip_start=0.0,
+                        clip_end=content_dur,
+                        output_path=ass_path,
+                    )
+                captioned_path = (
+                    self.settings.media_raw_dir
+                    / f"owned_{source.youtube_video_id}_cap.mp4"
+                )
+                # Burn ASS onto kinetic video (already 9:16)
+                run_ffmpeg(
+                    [
+                        "-i",
+                        str(kinetic_path),
+                        "-vf",
+                        f"{ass_filter_arg(ass_path)},setsar=1",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "veryfast",
+                        "-crf",
+                        "19",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "192k",
+                        "-movflags",
+                        "+faststart",
+                        str(captioned_path),
+                    ]
+                )
+                hook_input = captioned_path
+
+            title = generate_hook_title(script.hook_line, None)
+            description = generate_description(
+                source.title,
+                source.url,
+                topic_name,
+                owned=True,
+            )
+            ready_path = (
+                self.settings.media_ready_dir / f"owned_{source.youtube_video_id}.mp4"
+            )
+            burn_hook_text(hook_input, ready_path, title)
+
+            if pipeline.owned_enable_bumper:
+                bumper_tmp = (
+                    self.settings.media_raw_dir
+                    / f"owned_{source.youtube_video_id}_bumper.mp4"
+                )
+                try:
+                    wrap_with_bumpers(
+                        ready_path,
+                        bumper_tmp,
+                        brand=brand,
+                        intro_sec=float(pipeline.bumper_intro_sec),
+                        outro_sec=float(pipeline.bumper_outro_sec),
+                        intro_tagline=pipeline.bumper_intro_tagline,
+                        outro_tagline=pipeline.bumper_outro_tagline,
+                    )
+                    ready_path.unlink(missing_ok=True)
+                    shutil.move(str(bumper_tmp), str(ready_path))
+                    bumper_tmp = None
+                except Exception:
+                    logger.exception("Owned brand bumper failed; keeping hooked cut")
+                    if bumper_tmp is not None and bumper_tmp.exists():
+                        bumper_tmp.unlink(missing_ok=True)
+                    bumper_tmp = None
+
+            render_id = self.db.insert_render(
+                source_id=source.id,
+                clip_index=OWNED_CLIP_INDEX,
+                start_sec=0.0,
+                end_sec=content_dur,
+                ready_path=str(ready_path),
+                generated_title=title,
+                generated_description=description,
+                verifier_score=None,
+                status=RenderStatus.RENDERED.value,
+                kind="owned",
+            )
+            # Do not force source status away from clip-factory RENDERED;
+            # only upgrade discovered/downloaded so publish/status stay sensible.
+            if source.status in {
+                JobStatus.DISCOVERED.value,
+                JobStatus.DOWNLOADED.value,
+                JobStatus.FAILED.value,
+            }:
+                self.db.update_source(
+                    source.id,
+                    status=JobStatus.RENDERED.value,
+                    error=None,
+                )
+
+            logger.info(
+                "Owned Short ready source_id=%s render_id=%s path=%s novelty=%.2f",
+                source.id,
+                render_id,
+                ready_path,
+                float(script_meta.get("novelty") or 0),
+            )
+            return {
+                "status": "rendered",
+                "kind": "owned",
+                "source_id": source.id,
+                "render_id": render_id,
+                "ready_path": str(ready_path),
+                "title": title,
+                "topic_focus": brief.topic_focus,
+                "scenes_json": str(scenes_json),
+                "brief_json": str(brief_json),
+                "novelty": script_meta.get("novelty"),
+                "brief_meta": brief_meta,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Owned process failed source_id=%s", source.id)
+            return {
+                "status": "failed",
+                "kind": "owned",
+                "source_id": source.id,
+                "error": str(exc),
+            }
+        finally:
+            for temp in (vo_path, kinetic_path, ass_path, captioned_path, bumper_tmp):
+                if temp is not None and temp.exists():
+                    # Keep scenes/brief JSON; drop heavy intermediates
+                    if temp.suffix.lower() in {".mp4", ".mp3", ".ass"}:
+                        temp.unlink(missing_ok=True)
 
     def publish_next(self) -> dict:
         pipeline = self.settings.pipeline()

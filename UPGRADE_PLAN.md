@@ -19,14 +19,18 @@ as a new dependency.
 4. **Prompt was a one-shot ask** — one candidate, no boundary quotes, no
    structure checklist, no permission to return zero clips.
 
-### Monetization flag (strategic, NOT this session's code)
+### Monetization / originality layer (MVP shipped)
 
-YouTube Shorts revenue sharing explicitly excludes "non-original Shorts...
-reuploading other creators' content... compilations with no original content
-added". Burned captions/blur-pad do NOT count as transformation. Before scaling
-to multiple channels, the pipeline needs a genuine transformation layer
-(original scripted framing + narration, commentary-style editing). Keep as a
-future workstream.
+YouTube Shorts revenue sharing excludes non-original reuploads; captions/blur-pad
+do not count. MVP transformation (flag `enable_narration` in `topics.yaml`):
+
+- Gemini rewrites clip transcript → host VO script (novelty gate)
+- `edge-tts` synthesizes audio; source dialogue is muted
+- Karaoke captions follow the VO (faster-whisper on the TTS file)
+- Description includes source link + disclosure
+
+Still not legal advice: Content ID claims on footage remain possible. Multi-channel
+GCP scaling stays out of scope.
 
 ---
 

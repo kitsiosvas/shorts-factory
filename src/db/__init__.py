@@ -62,6 +62,7 @@ class Render:
     error: str | None
     created_at: str
     updated_at: str
+    kind: str = "clip"  # clip | owned
 
 
 @dataclass
@@ -113,6 +114,7 @@ CREATE TABLE IF NOT EXISTS renders (
     error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'clip',
     FOREIGN KEY(source_id) REFERENCES sources(id)
 );
 
@@ -146,7 +148,9 @@ def _row_to_source(row: sqlite3.Row) -> Source:
 
 
 def _row_to_render(row: sqlite3.Row) -> Render:
-    return Render(**dict(row))
+    data = dict(row)
+    data.setdefault("kind", "clip")
+    return Render(**data)
 
 
 class Database:
@@ -175,6 +179,11 @@ class Database:
             post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)")}
             if "render_id" not in post_cols:
                 conn.execute("ALTER TABLE posts ADD COLUMN render_id INTEGER")
+            render_cols = {r[1] for r in conn.execute("PRAGMA table_info(renders)")}
+            if "kind" not in render_cols:
+                conn.execute(
+                    "ALTER TABLE renders ADD COLUMN kind TEXT NOT NULL DEFAULT 'clip'"
+                )
 
     def source_exists(self, youtube_video_id: str) -> bool:
         with self.connect() as conn:
@@ -271,16 +280,20 @@ class Database:
         verifier_score: float | None,
         status: str = RenderStatus.RENDERED.value,
         error: str | None = None,
+        kind: str = "clip",
     ) -> int:
         now = _utcnow()
+        kind = (kind or "clip").strip().lower()
+        if kind not in {"clip", "owned"}:
+            kind = "clip"
         with self.connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO renders (
                     source_id, clip_index, start_sec, end_sec, ready_path,
                     generated_title, generated_description, verifier_score,
-                    status, error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, error, created_at, updated_at, kind
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source_id,
@@ -295,9 +308,64 @@ class Database:
                     error,
                     now,
                     now,
+                    kind,
                 ),
             )
             return int(cur.lastrowid)
+
+    def source_has_owned_render(self, source_id: int) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM renders
+                WHERE source_id = ? AND kind = 'owned'
+                LIMIT 1
+                """,
+                (source_id,),
+            ).fetchone()
+            return row is not None
+
+    def next_source_for_owned(
+        self,
+        *,
+        topic_id: str | None = None,
+    ) -> Source | None:
+        """Next downloaded/rendered source with no owned render yet."""
+        with self.connect() as conn:
+            if topic_id:
+                row = conn.execute(
+                    """
+                    SELECT s.* FROM sources s
+                    WHERE s.status IN (?, ?)
+                      AND s.topic_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM renders r
+                          WHERE r.source_id = s.id AND r.kind = 'owned'
+                      )
+                    ORDER BY s.created_at ASC
+                    LIMIT 1
+                    """,
+                    (
+                        JobStatus.DOWNLOADED.value,
+                        JobStatus.RENDERED.value,
+                        topic_id,
+                    ),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT s.* FROM sources s
+                    WHERE s.status IN (?, ?)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM renders r
+                          WHERE r.source_id = s.id AND r.kind = 'owned'
+                      )
+                    ORDER BY s.created_at ASC
+                    LIMIT 1
+                    """,
+                    (JobStatus.DOWNLOADED.value, JobStatus.RENDERED.value),
+                ).fetchone()
+            return _row_to_source(row) if row else None
 
     def get_render(self, render_id: int) -> Render | None:
         with self.connect() as conn:

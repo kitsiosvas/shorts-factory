@@ -6,12 +6,13 @@ topics:
     enabled: true
     display_name: Medicine Facts
     search_queries:
-      - "medical explanation"
-      - "how the body works"
-      - "doctor explains"
+      - "human body animation explained"
+      - "medical animation physiology"
+      - "anatomy whiteboard explained"
     exclude_keywords:
       - "asmr"
       - "prank"
+      - "reaction"
     min_duration_sec: 180
     max_duration_sec: 1200
     min_view_count: 50000
@@ -23,13 +24,14 @@ topics:
     enabled: true
     display_name: Sleep Science
     search_queries:
-      - "sleep science explained"
-      - "circadian rhythm explained"
-      - "how sleep works podcast"
+      - "sleep science animation explained"
+      - "circadian rhythm animation"
+      - "how sleep works podcast explained"
     exclude_keywords:
       - "asmr"
       - "sleep music"
       - "white noise"
+      - "reaction"
     min_duration_sec: 1200
     max_duration_sec: 7200
     min_view_count: 50000
@@ -41,12 +43,13 @@ topics:
     enabled: true
     display_name: Brain Performance
     search_queries:
-      - "dopamine explained"
-      - "focus and attention science"
-      - "neuroscience learning podcast"
+      - "dopamine animation explained"
+      - "neuroscience motion graphics"
+      - "brain science podcast explained"
     exclude_keywords:
       - "asmr"
       - "meditation music"
+      - "reaction"
     min_duration_sec: 1200
     max_duration_sec: 7200
     min_view_count: 50000
@@ -58,12 +61,13 @@ topics:
     enabled: true
     display_name: Psychology Explained
     search_queries:
-      - "cognitive bias explained"
-      - "habits psychology explained"
-      - "motivation psychology podcast"
+      - "cognitive bias animation"
+      - "psychology whiteboard explained"
+      - "habits psychology podcast explained"
     exclude_keywords:
       - "asmr"
       - "prank"
+      - "reaction"
     min_duration_sec: 1200
     max_duration_sec: 7200
     min_view_count: 50000
@@ -117,3 +121,25 @@ pipeline:
   max_clips_per_source: 10
   clip_min_gap_sec: 30
   picker_chunk_sec: 900
+  # Originality: only B-roll/animation/diagram clips get VO; talking heads rejected
+  enable_narration: true
+  narration_routing: auto
+  reject_talking_heads: true
+  narration_mode: mute_source_vo
+  tts_provider: edge_tts
+  tts_voice: en-US-AndrewNeural
+  narration_max_words: 110
+  min_script_novelty: 0.45
+  talking_head_motion: true
+  talking_head_zoom_end: 1.08
+  # Brand cards on VO / B-roll Shorts only
+  enable_brand_bumper: true
+  # brand_name: null  # defaults to topic display_name
+  bumper_intro_sec: 0.75
+  bumper_outro_sec: 0.9
+  bumper_intro_tagline: "facts in under a minute"
+  bumper_outro_tagline: "thanks for watching"
+  # Owned kinetic path (POST /process-owned-next) — A/B vs clip factory
+  owned_max_words: 110
+  owned_enable_bumper: true
+  owned_min_script_novelty: 0.40

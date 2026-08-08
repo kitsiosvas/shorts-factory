@@ -31,7 +31,31 @@ def generate_hook_title(source_title: str, transcript: str | None = None) -> str
     return base
 
 
-def generate_description(source_title: str, source_url: str, topic_name: str) -> str:
+def generate_description(
+    source_title: str,
+    source_url: str,
+    topic_name: str,
+    *,
+    narrated: bool = False,
+    owned: bool = False,
+) -> str:
+    if owned:
+        return (
+            f"{source_title}\n\n"
+            f"Original educational Short ({topic_name}) with our narration "
+            f"and visuals.\n"
+            f"Research inspired by: {source_url}\n"
+            f"Not affiliated with the original creator. Not medical advice.\n"
+            f"#Shorts\n"
+        )
+    if narrated:
+        return (
+            f"{source_title}\n\n"
+            f"Educational commentary with original narration ({topic_name}).\n"
+            f"Source: {source_url}\n"
+            f"Not affiliated with the original creator. Not medical advice.\n"
+            f"#Shorts\n"
+        )
     return (
         f"{source_title}\n\n"
         f"Topic: {topic_name}\n"
